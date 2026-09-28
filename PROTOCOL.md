@@ -1,0 +1,11 @@
+# SemanticDriftRegistry protocol V1
+
+Each immutable Watch fixes one HTTPS source URL and one normative target question. Registration requires a consensus-approved target, an independently retrieved and checked source, and a `PRESENT` or `NOT_STATED` semantic state. Watch and Baseline IDs start at 1. A Watch never exists without a first Baseline.
+
+A semantic state contains `presence`, `disposition`, `conditions`, `scope`, `exceptions`, and `quantitative_terms`. Missing semantic fields use literal `NONE`; a negative (`NOT_STATED`) state has all fields `NONE` and no quote. A positive (`PRESENT`) state has a nonempty direct quote. NFKC, trimming, and whitespace collapse precede storage; the SHA-256 semantic digest hashes an ordered JSON representation of the state and schema version, never raw HTML. The digest is an integrity fingerprint, not a semantic equivalence test.
+
+`check_drift` is permissionless. A non-owner waits 900 seconds after the last check; the owner bypasses this cooldown. Validators independently refetch the registered URL, independently extract current semantic state and an anchored four-field Semantic Delta Vector, compare the Consensus Critical Vector exactly, compare semantic payloads for material equivalence, and ground the leader's quote in their own source copy. The contract then computes `verdict` and the 13 specified change bits deterministically. HTTP failure or a page over 30,000 characters yields `UNVERIFIABLE`, never `RULE_DISAPPEARED`; ambiguous presence or relation yields `AMBIGUOUS` with zero flags.
+
+The fingerprint of `(baseline_id, source_status, current_semantic_digest, verdict, change_flags)` deduplicates consecutive identical observations while updating the latest check timestamp and check counter. Baseline adoption requires the Watch owner, its latest observation, the active baseline, `MATERIAL_DRIFT`, source `OK`, and `PRESENT` or `NOT_STATED`. It appends a new Baseline and updates the Watch pointer; old Baselines and Observations remain readable. Adoption means a new comparison baseline, not approval of a policy change.
+
+The only writes are `register_watch`, `check_drift`, and `adopt_observation`. Reads expose each record, active Baseline, both histories, Watch count, and version. Persisted enums are compact integers as specified in the HANDOFF.
