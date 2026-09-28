@@ -14,6 +14,8 @@ Status on 2026-09-28: the self-contained `SemanticDriftRegistry` contract is imp
 | Release test instance | [`0x914BE63CCAE73DF6f039cdb84D46b951851aB8Ca`](https://explorer-studio.genlayer.com/address/0x914BE63CCAE73DF6f039cdb84D46b951851aB8Ca) |
 | Deployment transaction | [`0xc3cfc4e9e07cb90fc4d236c3d5e7eb76da23b8cb9edc4b40a3d32457285e01eb`](https://explorer-studio.genlayer.com/tx/0xc3cfc4e9e07cb90fc4d236c3d5e7eb76da23b8cb9edc4b40a3d32457285e01eb) — `FINALIZED`, GenVM `SUCCESS`, consensus `Accepted`, Normal Full Consensus |
 
+[Studio Explorer proof screenshot](studio_release_proof.png) shows the release address, deploy transaction and latest finalized calls. The transaction links above are authoritative for full hashes and outcomes.
+
 The same release source was also deployed earlier at [`0x28011fa4C83D311d028Fb89A23827d4B6C704f48`](https://explorer-studio.genlayer.com/address/0x28011fa4C83D311d028Fb89A23827d4B6C704f48), [deployment `0xfb87d67778c660c49da0b4757ff73c6eb2e12f302cfbf6f2f3a893f6f61d312e`](https://explorer-studio.genlayer.com/tx/0xfb87d67778c660c49da0b4757ff73c6eb2e12f302cfbf6f2f3a893f6f61d312e), also `FINALIZED / SUCCESS / Accepted`. A browser-session reset removed that editor's local deployment panel, so the identical source was redeployed for final-instance transaction tests; the source SHA-256 matched both on-chain copies.
 
 ## Files and local tests
