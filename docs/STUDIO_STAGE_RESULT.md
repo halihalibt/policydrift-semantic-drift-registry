@@ -1,6 +1,6 @@
 # PolicyDrift V1 · Studio Intelligent Contract stage
 
-Status on 2026-09-28: the self-contained `SemanticDriftRegistry` contract is implemented, locally tested, and deployed and exercised in **GenLayer Studio / Studionet**. This is the HANDOFF Work Execution Order through step 28. The Project/React repository and frontend (step 29 onward) have not started.
+Status on 2026-09-28: the self-contained `SemanticDriftRegistry` contract was implemented, locally tested, deployed and exercised in **GenLayer Studio / Studionet**. This document records that historical V1 release at commit `873a1f3` and its original source hash; a later V1.1 presence-transition repair candidate exists locally but has **not** replaced or upgraded this deployment. The Project/React phase was subsequent work and is outside the scope of this historical stage result.
 
 ## Frozen runtime and deployment
 

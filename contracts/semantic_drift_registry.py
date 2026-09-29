@@ -47,7 +47,7 @@ DELTA_ALLOWED = (
     {NOT_APPLICABLE, SAME, CHANGED, RELATION_AMBIGUOUS},
 )
 MIN_PUBLIC_CHECK_INTERVAL = 15 * 60
-PROTOCOL_VERSION = "PolicyDrift-V1-Studio"
+PROTOCOL_VERSION = "PolicyDrift-V1.1-Studio"
 
 
 @allow_storage
@@ -230,7 +230,8 @@ def _fetch_source(url: str) -> tuple[int, str]:
 def _parse_state(payload: dict, source_status: int) -> dict:
     if type(payload) is not dict or set(payload) != {"presence", "disposition", *STATE_FIELDS}:
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
-    if payload["presence"] not in PRESENCE_NAMES or payload["disposition"] not in DISPOSITION_NAMES:
+    if (type(payload["presence"]) is not str or payload["presence"] not in PRESENCE_NAMES
+            or type(payload["disposition"]) is not str or payload["disposition"] not in DISPOSITION_NAMES):
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
     state = {"presence": PRESENCE_NAMES[payload["presence"]], "disposition": DISPOSITION_NAMES[payload["disposition"]]}
     for field in STATE_FIELDS:
@@ -255,7 +256,7 @@ def _parse_state(payload: dict, source_status: int) -> dict:
     return state
 
 
-def _parse_extraction(payload: dict, is_drift: bool) -> dict:
+def _parse_extraction(payload: dict, is_drift: bool, baseline_presence: int | None = None) -> dict:
     required = {"schema_version", "source_status", "current_state", "evidence_excerpt"}
     if is_drift:
         required.add("delta")
@@ -263,7 +264,7 @@ def _parse_extraction(payload: dict, is_drift: bool) -> dict:
         required.add("target_status")
     if type(payload) is not dict or set(payload) != required or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
-    if payload["source_status"] not in SOURCE_NAMES:
+    if type(payload["source_status"]) is not str or payload["source_status"] not in SOURCE_NAMES:
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
     if not is_drift and payload["target_status"] != "VALID":
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
@@ -279,14 +280,21 @@ def _parse_extraction(payload: dict, is_drift: bool) -> dict:
         _error("PD011", "INVALID_CONSENSUS_OUTPUT")
     parsed = {"source_status": status, "state": state, "evidence_excerpt": quote}
     if is_drift:
+        if baseline_presence not in (PRESENT, NOT_STATED):
+            _error("PD011", "INVALID_CONSENSUS_OUTPUT")
         delta = payload["delta"]
         if type(delta) is not dict or set(delta) != set(DELTA_FIELDS):
             _error("PD011", "INVALID_CONSENSUS_OUTPUT")
         relations = []
-        for idx, field in enumerate(DELTA_FIELDS):
-            if delta[field] not in RELATION_NAMES or RELATION_NAMES[delta[field]] not in DELTA_ALLOWED[idx]:
+        for field in DELTA_FIELDS:
+            if type(delta[field]) is not str or delta[field] not in RELATION_NAMES:
                 _error("PD011", "INVALID_CONSENSUS_OUTPUT")
             relations.append(RELATION_NAMES[delta[field]])
+        if status == SOURCE_OK and (baseline_presence, state["presence"]) in ((NOT_STATED, PRESENT), (PRESENT, NOT_STATED)):
+            # A definite presence transition decides the verdict unless a relation is AMBIGUOUS.
+            relations = [RELATION_AMBIGUOUS if relation == RELATION_AMBIGUOUS else NOT_APPLICABLE for relation in relations]
+        if any(relation not in DELTA_ALLOWED[idx] for idx, relation in enumerate(relations)):
+            _error("PD011", "INVALID_CONSENSUS_OUTPUT")
         if status != SOURCE_OK and any(relation != NOT_APPLICABLE for relation in relations):
             _error("PD011", "INVALID_CONSENSUS_OUTPUT")
         parsed["delta"] = relations
@@ -410,10 +418,11 @@ def _compare_semantic_payload(leader: dict, validator: dict) -> bool:
             and all(type(decision[field]) is bool and decision[field] for field in STATE_FIELDS))
 
 
-def _validate_independent(leader_payload: dict, validator_payload: dict, source_text: str, is_drift: bool) -> bool:
-    leader = _parse_extraction(leader_payload, is_drift)
-    validator = _parse_extraction(validator_payload, is_drift)
-    # Exact CCV: the fixed fields that determine the on-chain verdict.
+def _validate_independent(leader_payload: dict, validator_payload: dict, source_text: str, is_drift: bool,
+                          baseline_presence: int | None = None) -> bool:
+    leader = _parse_extraction(leader_payload, is_drift, baseline_presence)
+    validator = _parse_extraction(validator_payload, is_drift, baseline_presence)
+    # Exact CCV, including canonicalized relations on definite presence transitions.
     critical_leader = (leader["source_status"], leader["state"]["presence"], leader["state"]["disposition"])
     critical_validator = (validator["source_status"], validator["state"]["presence"], validator["state"]["disposition"])
     if is_drift:
@@ -430,10 +439,11 @@ def _validate_independent(leader_payload: dict, validator_payload: dict, source_
 
 def _consensus_extract(url: str, target: str, baseline: dict | None) -> dict:
     is_drift = baseline is not None
+    baseline_presence = PRESENCE_NAMES[baseline["presence"]] if is_drift else None
 
     def leader_fn():
         payload, _ = _extract(url, target, baseline)
-        _parse_extraction(payload, is_drift)  # malformed JSON fails closed, without repair
+        _parse_extraction(payload, is_drift, baseline_presence)  # malformed JSON fails closed, without repair
         return payload
 
     def validator_fn(result: gl.vm.Result) -> bool:
@@ -441,12 +451,12 @@ def _consensus_extract(url: str, target: str, baseline: dict | None) -> dict:
             return False
         try:
             independently, source_text = _extract(url, target, baseline)
-            return _validate_independent(result.calldata, independently, source_text, is_drift)
+            return _validate_independent(result.calldata, independently, source_text, is_drift, baseline_presence)
         except Exception:
             return False
 
     approved = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-    return _parse_extraction(approved, is_drift)
+    return _parse_extraction(approved, is_drift, baseline_presence)
 
 
 def _consensus_target_validity(target: str) -> bool:

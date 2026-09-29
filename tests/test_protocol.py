@@ -74,6 +74,7 @@ class FakeNondet:
         self.web_raises = False
         self.leader_payload_override = None
         self.extract_calls = 0
+        self.semantic_equivalence = dict.fromkeys(("conditions", "scope", "exceptions", "quantitative_terms"), True)
 
     class Web:
         def __init__(self, outer):
@@ -93,7 +94,7 @@ class FakeNondet:
         assert response_format == "json"
         self.llm_calls += 1
         if "<untrusted_leader>" in prompt:
-            return {k: True for k in ("conditions", "scope", "exceptions", "quantitative_terms")}
+            return dict(self.semantic_equivalence)
         if "<untrusted_source>" not in prompt:
             return {"target_status": "INVALID" if self.invalid_target else "VALID"}
         drift = "<accepted_baseline>" in prompt
@@ -152,6 +153,15 @@ def state(condition="Attribution is required.", disposition="ALLOWED"):
     }
 
 
+def drift_payload(current=None, delta=None, quote="Policy quote."):
+    return {
+        "schema_version": 1, "source_status": "OK",
+        "current_state": current or state(),
+        "delta": delta or dict.fromkeys(("conditions", "scope", "exceptions", "quantitative_terms"), "SAME"),
+        "evidence_excerpt": quote,
+    }
+
+
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
         self.m, self.gl, self.nondet = make_host()
@@ -168,6 +178,7 @@ class ProtocolTests(unittest.TestCase):
     def test_register_and_independent_validation(self):
         watch_id = self.register()
         self.assertEqual(watch_id, 1)
+        self.assertEqual(self.contract.get_protocol_version(), "PolicyDrift-V1.1-Studio")
         self.assertEqual(self.nondet.web_calls, 2)
         self.assertEqual(self.contract.get_watch_baseline_ids(watch_id), [1])
         self.assertEqual(self.contract.get_watch_count(), 1)
@@ -220,6 +231,70 @@ class ProtocolTests(unittest.TestCase):
         self.nondet.current_state = None
         disappeared = self.contract.check_drift(1)
         self.assertEqual(self.contract.get_observation(disappeared)["change_flags"], self.m.RULE_DISAPPEARED)
+
+    def test_rule_appeared_normalizes_independent_known_relations(self):
+        self.nondet.current_state = None
+        self.register()
+        self.nondet.body = b"API data may not be used for AI model training."
+        self.nondet.current_state = state("NONE", "PROHIBITED")
+        self.nondet.current_state["scope"] = "Use of API data for AI model training"
+        self.nondet.delta = dict(conditions="SAME", scope="SAME", exceptions="ADDED", quantitative_terms="CHANGED")
+        # All leader labels are globally known; some are disallowed for these particular fields.
+        self.nondet.leader_payload_override = {"delta": dict(
+            conditions="REDUCED", scope="ADDED", exceptions="EXPANDED", quantitative_terms="REMOVED")}
+        observation = self.contract.get_observation(self.contract.check_drift(1))
+        self.assertEqual((observation["verdict"], observation["change_flags"]),
+                         (self.m.MATERIAL_DRIFT, self.m.RULE_APPEARED))
+        self.assertEqual([observation[field] for field in (
+            "condition_relation", "scope_relation", "exception_relation", "quantitative_relation")],
+            [self.m.NOT_APPLICABLE] * 4)
+        self.assertEqual(observation["current_scope"], "Use of API data for AI model training")
+        self.assertEqual(self.nondet.web_calls, 4)  # Both leader and validator fetched independently.
+
+    def test_rule_disappeared_normalizes_independent_known_relations(self):
+        self.register()
+        self.nondet.current_state = None
+        self.nondet.delta = dict(conditions="SAME", scope="SAME", exceptions="SAME", quantitative_terms="SAME")
+        self.nondet.leader_payload_override = {"delta": dict(
+            conditions="EXPANDED", scope="REMOVED", exceptions="REDUCED", quantitative_terms="ADDED")}
+        observation = self.contract.get_observation(self.contract.check_drift(1))
+        self.assertEqual((observation["verdict"], observation["change_flags"]),
+                         (self.m.MATERIAL_DRIFT, self.m.RULE_DISAPPEARED))
+        self.assertEqual([observation[field] for field in (
+            "condition_relation", "scope_relation", "exception_relation", "quantitative_relation")],
+            [self.m.NOT_APPLICABLE] * 4)
+        self.assertEqual(observation["evidence_excerpt"], "")
+
+    def test_presence_transition_ambiguous_relation_is_preserved(self):
+        self.nondet.current_state = None
+        self.register()
+        self.nondet.current_state = state()
+        self.nondet.delta = dict(conditions="SAME", scope="AMBIGUOUS", exceptions="SAME", quantitative_terms="SAME")
+        self.nondet.leader_payload_override = {"delta": dict(
+            conditions="REDUCED", scope="AMBIGUOUS", exceptions="EXPANDED", quantitative_terms="ADDED")}
+        observation = self.contract.get_observation(self.contract.check_drift(1))
+        self.assertEqual((observation["verdict"], observation["change_flags"], observation["scope_relation"]),
+                         (self.m.VERDICT_AMBIGUOUS, 0, self.m.RELATION_AMBIGUOUS))
+        self.assertEqual(observation["condition_relation"], self.m.NOT_APPLICABLE)
+
+        # A real ambiguity cannot be erased to agree with a definite relation.
+        self.nondet.leader_payload_override = {"delta": dict(
+            conditions="REDUCED", scope="SAME", exceptions="EXPANDED", quantitative_terms="ADDED")}
+        with self.assertRaisesRegex(RuntimeError, "validator rejected"):
+            self.contract.check_drift(1)
+        self.assertEqual((self.contract.get_watch(1)["check_count"], self.contract.get_watch(1)["observation_count"]), (1, 1))
+
+        # The reverse transition must also keep a genuine ambiguous relation.
+        self.nondet.leader_payload_override = None
+        self.nondet.current_state = state()
+        reverse_watch = self.register()
+        self.nondet.current_state = None
+        self.nondet.delta = dict(conditions="SAME", scope="AMBIGUOUS", exceptions="SAME", quantitative_terms="SAME")
+        self.nondet.leader_payload_override = {"delta": dict(
+            conditions="REDUCED", scope="AMBIGUOUS", exceptions="EXPANDED", quantitative_terms="ADDED")}
+        reverse = self.contract.get_observation(self.contract.check_drift(reverse_watch))
+        self.assertEqual((reverse["verdict"], reverse["change_flags"], reverse["scope_relation"]),
+                         (self.m.VERDICT_AMBIGUOUS, 0, self.m.RELATION_AMBIGUOUS))
 
     def test_404_is_unverifiable_not_disappearance(self):
         self.register()
@@ -297,6 +372,111 @@ class ProtocolTests(unittest.TestCase):
         paraphrase = json.loads(json.dumps(leader))
         paraphrase["current_state"]["conditions"] = "Provide attribution."
         self.assertTrue(self.m._validate_independent(leader, paraphrase, "Attribution is required.", False))
+
+    def test_transition_unknown_enum_bad_schema_and_types_fail_closed(self):
+        present = state("NONE", "PROHIBITED")
+        valid = drift_payload(present)
+        cases = {}
+        unknown = json.loads(json.dumps(valid))
+        unknown["delta"]["scope"] = "MYSTERY"
+        cases["unknown relation"] = unknown
+        wrong_relation_type = json.loads(json.dumps(valid))
+        wrong_relation_type["delta"]["scope"] = ["SAME"]
+        cases["relation type"] = wrong_relation_type
+        wrong_schema = json.loads(json.dumps(valid))
+        wrong_schema["schema_version"] = 2
+        cases["schema version"] = wrong_schema
+        extra_key = json.loads(json.dumps(valid))
+        extra_key["change_flags"] = 1
+        cases["extra key"] = extra_key
+        missing_key = json.loads(json.dumps(valid))
+        del missing_key["delta"]["scope"]
+        cases["missing delta key"] = missing_key
+        wrong_status_type = json.loads(json.dumps(valid))
+        wrong_status_type["source_status"] = ["OK"]
+        cases["source status type"] = wrong_status_type
+        wrong_presence_type = json.loads(json.dumps(valid))
+        wrong_presence_type["current_state"]["presence"] = ["PRESENT"]
+        cases["presence type"] = wrong_presence_type
+        wrong_disposition = json.loads(json.dumps(valid))
+        wrong_disposition["current_state"]["disposition"] = "NONE"
+        cases["invalid present disposition"] = wrong_disposition
+        wrong_field_type = json.loads(json.dumps(valid))
+        wrong_field_type["current_state"]["scope"] = 123
+        cases["semantic field type"] = wrong_field_type
+        wrong_quote_type = json.loads(json.dumps(valid))
+        wrong_quote_type["evidence_excerpt"] = None
+        cases["evidence type"] = wrong_quote_type
+        cases["non-object JSON result"] = "not a JSON object"
+        for name, payload in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "PD011"):
+                self.m._parse_extraction(payload, True, self.m.NOT_STATED)
+        with self.assertRaisesRegex(ValueError, "PD011"):
+            self.m._parse_extraction(valid, True)  # Never silently omit baseline context.
+
+        # Malformed leader output cannot advance a registered Watch.
+        self.nondet.current_state = None
+        self.register()
+        self.nondet.current_state = present
+        self.nondet.leader_payload_override = {"delta": unknown["delta"]}
+        with self.assertRaisesRegex(ValueError, "PD011"):
+            self.contract.check_drift(1)
+        self.assertEqual((self.contract.get_watch(1)["check_count"], self.contract.get_watch(1)["observation_count"]), (0, 0))
+
+    def test_present_to_present_verdicts_and_exact_ccv_remain_strict(self):
+        self.register()
+        self.nondet.delta = dict.fromkeys(("conditions", "scope", "exceptions", "quantitative_terms"), "SAME")
+        self.nondet.delta["conditions"] = "CHANGED"
+        self.nondet.current_state = state("Prior written permission is required.")
+        self.nondet.body = b"Prior written permission is required."
+        changed = self.contract.get_observation(self.contract.check_drift(1))
+        self.assertEqual((changed["verdict"], changed["change_flags"], changed["condition_relation"]),
+                         (self.m.MATERIAL_DRIFT, self.m.CONDITION_CHANGED, self.m.CHANGED))
+        self.nondet.current_state = state()
+        self.nondet.body = b"Attribution is required."
+        self.nondet.delta["conditions"] = "SAME"
+        same = self.contract.get_observation(self.contract.check_drift(1))
+        self.assertEqual((same["verdict"], same["change_flags"]), (self.m.NO_MATERIAL_DRIFT, 0))
+
+        leader = drift_payload(quote="Attribution is required.")
+        candidate = json.loads(json.dumps(leader))
+        candidate["delta"]["conditions"] = "CHANGED"
+        self.assertFalse(self.m._validate_independent(leader, candidate, "Attribution is required.", True, self.m.PRESENT))
+        invalid = json.loads(json.dumps(leader))
+        invalid["delta"]["scope"] = "ADDED"  # Globally known, but invalid for scope outside a transition.
+        with self.assertRaisesRegex(ValueError, "PD011"):
+            self.m._parse_extraction(invalid, True, self.m.PRESENT)
+        same_absence = json.loads(json.dumps(leader))
+        same_absence["current_state"] = dict(presence="NOT_STATED", disposition="NONE", conditions="NONE",
+                                             scope="NONE", exceptions="NONE", quantitative_terms="NONE")
+        same_absence["evidence_excerpt"] = ""
+        same_absence["delta"]["scope"] = "ADDED"
+        with self.assertRaisesRegex(ValueError, "PD011"):
+            self.m._parse_extraction(same_absence, True, self.m.NOT_STATED)
+
+    def test_state_equivalence_core_ccv_and_evidence_guards_stay_strict(self):
+        text = "Attribution is required."
+        leader = drift_payload(quote=text)
+        for baseline in (self.m.PRESENT, self.m.NOT_STATED):
+            with self.subTest(baseline=baseline):
+                self.assertTrue(self.m._validate_independent(leader, leader, text, True, baseline))
+                absent = json.loads(json.dumps(leader))
+                absent["current_state"] = dict(presence="NOT_STATED", disposition="NONE", conditions="NONE",
+                                               scope="NONE", exceptions="NONE", quantitative_terms="NONE")
+                absent["evidence_excerpt"] = ""
+                self.assertFalse(self.m._validate_independent(leader, absent, text, True, baseline))
+                other_disposition = json.loads(json.dumps(leader))
+                other_disposition["current_state"]["disposition"] = "PROHIBITED"
+                self.assertFalse(self.m._validate_independent(leader, other_disposition, text, True, baseline))
+                self.assertFalse(self.m._validate_independent(leader, leader, "Not the claimed quote", True, baseline))
+                for field in ("conditions", "scope", "exceptions", "quantitative_terms"):
+                    candidate = json.loads(json.dumps(leader))
+                    candidate["current_state"][field] = "Materially different rule"
+                    self.nondet.semantic_equivalence[field] = False
+                    try:
+                        self.assertFalse(self.m._validate_independent(leader, candidate, text, True, baseline), field)
+                    finally:
+                        self.nondet.semantic_equivalence[field] = True
 
     def test_invalid_targets_urls_and_untrusted_payloads(self):
         for url in ("http://example.com/p", "https://127.0.0.1/", "https://[::1]/",
